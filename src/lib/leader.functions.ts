@@ -1,7 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { verdaChat, safeJSONParse } from "./llm.server";
+import { verdaChat, safeJSONParse, wrapUntrustedInput, UNTRUSTED_INPUT_DIRECTIVE } from "./llm.server";
+import { LeaderDecisionSchema, validate } from "./assessment-schemas";
 
 /**
  * Leader (router) agent.
@@ -46,33 +47,29 @@ Return STRICT JSON:
   "rationale": string                     // 1-2 sentences explaining the routing decision
 }
 
-Be strict. A one-liner is never enough.`;
+Be strict. A one-liner is never enough.${UNTRUSTED_INPUT_DIRECTIVE}`;
 
     const out = await verdaChat({
       messages: [
         { role: "system", content: sys },
-        { role: "user", content: data.useCase },
+        { role: "user", content: wrapUntrustedInput(data.useCase) },
       ],
       temperature: 0,
       json: true,
       max_tokens: 700,
     });
 
-    type LeaderDecision = {
-      next: "assessment" | "ask_user";
-      readiness_score: number;
-      coverage: Record<string, boolean>;
-      missing_questions: string[];
-      rationale: string;
-    };
-    const parsed = safeJSONParse<LeaderDecision>(out);
-    return (
-      parsed ?? {
+    const parsed = safeJSONParse(out);
+    const result = validate(LeaderDecisionSchema, parsed);
+    if (!result.ok) {
+      console.warn(`[leader] invalid LLM output: ${result.reason}`);
+      return {
         next: "ask_user" as const,
         readiness_score: 0,
         coverage: {},
-        missing_questions: ["Leader parser failed — please add more detail and retry."],
-        rationale: "Leader could not parse the routing decision.",
-      }
-    );
+        missing_questions: ["Leader output failed validation — please add more detail and retry."],
+        rationale: "Leader could not produce a well-formed routing decision.",
+      };
+    }
+    return result.value;
   });

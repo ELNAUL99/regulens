@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { mistralChat } from "./llm.server";
+import { mistralChat, wrapUntrustedInput, UNTRUSTED_INPUT_DIRECTIVE } from "./llm.server";
 
 /** List messages for a session (user must own the session). */
 export const listMessages = createServerFn({ method: "POST" })
@@ -82,10 +82,10 @@ Rules:
 - Ground every legal claim in an Article or Annex point already cited in the assessment, or in the use-case facts. If a question cannot be answered from the existing assessment + use-case, say so and list what additional information would be needed.
 - Never invent citations. Refer to articles as "Art. 5", "Art. 50", "Annex III §4", etc.
 - Markdown is allowed. Keep responses under ~250 words unless asked to expand.
-- This is preliminary triage, not legal advice — remind the user only if they ask for definitive advice.`;
+- This is preliminary triage, not legal advice — remind the user only if they ask for definitive advice.${UNTRUSTED_INPUT_DIRECTIVE}`;
 
-    const userPreamble = `## Original use-case
-${(doc?.content ?? "(missing)").slice(0, 8000)}
+    const userPreamble = `## Original use-case (untrusted user submission)
+${wrapUntrustedInput((doc?.content ?? "(missing)").slice(0, 8000))}
 
 ## Council assessment (already delivered)
 ${assessmentSummary}`;

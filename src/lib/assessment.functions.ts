@@ -1,7 +1,22 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { mistralChat, verdaChat, verdaEmbed, safeJSONParse } from "./llm.server";
+import {
+  mistralChat,
+  verdaChat,
+  verdaEmbed,
+  safeJSONParse,
+  wrapUntrustedInput,
+  UNTRUSTED_INPUT_DIRECTIVE,
+} from "./llm.server";
+import {
+  AssessmentSchema,
+  FactsSchema,
+  SufficiencySchema,
+  validate,
+  type Assessment,
+  type Facts,
+} from "./assessment-schemas";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -44,7 +59,7 @@ function formatContext(chunks: RetrievedChunk[]): string {
 }
 
 /** Stage 1 — Extractor (Verda/Llama-8B): pull structured facts from the use-case. */
-async function extractFacts(useCase: string) {
+async function extractFacts(useCase: string): Promise<Facts> {
   const sys = `You extract structured facts from an AI use-case description for EU AI Act assessment. Output strict JSON with keys:
 - purpose: one-sentence intended purpose
 - modality: one of "text", "image", "video", "audio", "biometric", "tabular", "multimodal", "other"
@@ -60,21 +75,31 @@ async function extractFacts(useCase: string) {
 - real_time_remote_biometric_id: boolean — does it perform real-time remote biometric identification of natural persons (e.g. live facial recognition against a watchlist or to flag unknown/unauthorised individuals)?
 - law_enforcement_context: boolean — is it used by, on behalf of, or in close cooperation with police, border, customs, intelligence, or other security/law-enforcement authorities (including airport/transport security and private security acting under a public-safety mandate)?
 - role_hint: "provider" | "deployer" | "both" | "unknown"
-- missing_info: array of short strings — important facts not present in the description`;
+- missing_info: array of short strings — important facts not present in the description${UNTRUSTED_INPUT_DIRECTIVE}`;
   const out = await verdaChat({
     messages: [
       { role: "system", content: sys },
-      { role: "user", content: useCase },
+      { role: "user", content: wrapUntrustedInput(useCase) },
     ],
     temperature: 0,
     json: true,
     max_tokens: 1024,
   });
-  return safeJSONParse<Record<string, unknown>>(out) ?? { raw: out };
+  const parsed = safeJSONParse(out);
+  const result = validate(FactsSchema, parsed);
+  if (!result.ok) {
+    console.warn(`[extractFacts] invalid LLM output: ${result.reason}`);
+    return {};
+  }
+  return result.value;
 }
 
 /** Stage 2 — Council reasoning (Mistral large). Returns the structured assessment. */
-async function councilAssess(useCase: string, facts: unknown, context: string) {
+async function councilAssess(
+  useCase: string,
+  facts: unknown,
+  context: string,
+): Promise<{ ok: true; assessment: Assessment } | { ok: false; reason: string }> {
   const sys = `You are an expert legal panel assessing an AI use-case against the EU AI Act (Regulation 2024/1689). You receive: (a) the original use-case, (b) extracted facts, (c) retrieved excerpts from the Act, each tagged with a citation like "Art. 5" or "Annex III §4". You MUST cite using ONLY those tags.
 
 Return STRICT JSON with this schema:
@@ -120,10 +145,10 @@ Rules:
 - When biometric/public-space/law-enforcement facts are ambiguous, prefer "prohibited" with a lower confidence and list the missing facts that would move it to "high", rather than defaulting to "high".
 - Otherwise apply Article 6 + Annex III to determine high-risk.
 - Generative/conversational AI without high-risk use is typically "limited" with Art. 50 transparency duties.
-- Never invent citations. If you have insufficient grounding, lower confidence and list what's missing.`;
+- Never invent citations. If you have insufficient grounding, lower confidence and list what's missing.${UNTRUSTED_INPUT_DIRECTIVE}`;
 
-  const user = `## Use-case
-${useCase}
+  const user = `## Use-case (untrusted user submission)
+${wrapUntrustedInput(useCase)}
 
 ## Extracted facts
 ${JSON.stringify(facts, null, 2)}
@@ -142,20 +167,24 @@ Produce the JSON now.`;
     json: true,
     max_tokens: 3000,
   });
-  return safeJSONParse<Record<string, unknown>>(out) ?? { raw: out };
+  const parsed = safeJSONParse(out);
+  const result = validate(AssessmentSchema, parsed);
+  if (!result.ok) {
+    return { ok: false, reason: result.reason };
+  }
+  return { ok: true, assessment: result.value };
 }
 
 /** Stage 3 — Verifier: ensure citations are grounded in the retrieved chunks. */
 function verifyCitations(
-  assessment: Record<string, unknown>,
+  assessment: Assessment,
   chunks: RetrievedChunk[],
-): { assessment: Record<string, unknown>; verifier_notes: string[] } {
+): { assessment: Assessment; verifier_notes: string[] } {
   const notes: string[] = [];
   const allowed = new Set(
     chunks.map((c) => (c.annex_point ? `${c.article_id} §${c.annex_point}` : c.article_id)),
   );
-  const raw = assessment.citations;
-  const cites = Array.isArray(raw) ? (raw as { tag: string; quote: string }[]) : [];
+  const cites = assessment.citations;
   const kept = cites.filter((c) => {
     // Allow exact match or just article match (drop §point).
     if (allowed.has(c.tag)) return true;
@@ -167,11 +196,11 @@ function verifyCitations(
   }
   if (kept.length === 0) {
     notes.push("No grounded citations remained; confidence reduced.");
-    const conf = (assessment.confidence as Record<string, number>) ?? {};
+    const conf = assessment.confidence;
     assessment.confidence = {
-      risk_tier: Math.min(conf.risk_tier ?? 0.5, 0.4),
-      role_determination: Math.min(conf.role_determination ?? 0.5, 0.4),
-      overall: Math.min(conf.overall ?? 0.5, 0.35),
+      risk_tier: Math.min(conf.risk_tier, 0.4),
+      role_determination: Math.min(conf.role_determination, 0.4),
+      overall: Math.min(conf.overall, 0.35),
     };
   }
   assessment.citations = kept;
@@ -216,10 +245,13 @@ export const runAssessment = createServerFn({ method: "POST" })
       const chunks = await retrieve(supabase, retrievalQuery, 24);
 
       // 4. Council reasoning.
-      const rawAssessment = await councilAssess(data.useCase, facts, formatContext(chunks));
+      const council = await councilAssess(data.useCase, facts, formatContext(chunks));
+      if (!council.ok) {
+        throw new Error(`Council output failed validation: ${council.reason}`);
+      }
 
       // 5. Verifier.
-      const { assessment, verifier_notes } = verifyCitations(rawAssessment, chunks);
+      const { assessment, verifier_notes } = verifyCitations(council.assessment, chunks);
 
       // 6. Persist.
       const { data: saved, error: aErr } = await supabase
@@ -227,16 +259,16 @@ export const runAssessment = createServerFn({ method: "POST" })
         .insert({
           session_id: session.id,
           status: "final",
-          summary: (assessment.summary as string) ?? null,
+          summary: assessment.summary,
           facts: facts as never,
-          preliminary_assessment: (assessment.preliminary_assessment ?? {}) as never,
-          governance_observations: (assessment.governance_observations ?? {}) as never,
-          missing_info: (assessment.missing_info ?? []) as never,
-          citations: (assessment.citations ?? []) as never,
-          confidence: (assessment.confidence ?? {}) as never,
-          art5_banner: (assessment.art5_banner ?? {}) as never,
-          role_determination: (assessment.role_determination as string) ?? null,
-          risk_tier: (assessment.risk_tier as string) ?? null,
+          preliminary_assessment: assessment.preliminary_assessment as never,
+          governance_observations: assessment.governance_observations as never,
+          missing_info: assessment.missing_info as never,
+          citations: assessment.citations as never,
+          confidence: assessment.confidence as never,
+          art5_banner: assessment.art5_banner as never,
+          role_determination: assessment.role_determination,
+          risk_tier: assessment.risk_tier,
         })
         .select()
         .single();
@@ -344,30 +376,27 @@ export const checkSufficiency = createServerFn({ method: "POST" })
   "rationale": string                     // 1-2 sentences explaining the verdict
 }
 
-Be strict: a one-line description is NOT sufficient. A description that says only "we built a chatbot" or "we use AI for hiring" is NOT sufficient. Score 0.7+ only if at least purpose, users/affected persons, domain, and automation level are clear.`;
+Be strict: a one-line description is NOT sufficient. A description that says only "we built a chatbot" or "we use AI for hiring" is NOT sufficient. Score 0.7+ only if at least purpose, users/affected persons, domain, and automation level are clear.${UNTRUSTED_INPUT_DIRECTIVE}`;
     const out = await verdaChat({
       messages: [
         { role: "system", content: sys },
-        { role: "user", content: data.useCase },
+        { role: "user", content: wrapUntrustedInput(data.useCase) },
       ],
       temperature: 0,
       json: true,
       max_tokens: 700,
     });
-    const parsed = safeJSONParse<{
-      sufficient: boolean;
-      score: number;
-      coverage: Record<string, boolean>;
-      missing_questions: string[];
-      rationale: string;
-    }>(out);
-    return (
-      parsed ?? {
+    const parsed = safeJSONParse(out);
+    const result = validate(SufficiencySchema, parsed);
+    if (!result.ok) {
+      console.warn(`[checkSufficiency] invalid LLM output: ${result.reason}`);
+      return {
         sufficient: false,
         score: 0,
         coverage: {},
-        missing_questions: ["Could not parse pre-flight check; please add more detail and retry."],
-        rationale: "Pre-flight parser failed.",
-      }
-    );
+        missing_questions: ["Pre-flight check output failed validation; please add more detail and retry."],
+        rationale: "Pre-flight check could not produce a well-formed response.",
+      };
+    }
+    return result.value;
   });
