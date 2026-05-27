@@ -100,10 +100,25 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
   errorComponent: ErrorComponent,
 });
 
+// Inline pre-hydration script: applies the saved theme to <html> before the
+// first paint so users never see a flash of the wrong palette. Defaults to dark.
+const THEME_INIT_SCRIPT = `
+(function () {
+  try {
+    var saved = localStorage.getItem("regulens-theme");
+    var theme = saved === "light" || saved === "dark" ? saved : "dark";
+    if (theme === "dark") document.documentElement.classList.add("dark");
+  } catch (e) {
+    document.documentElement.classList.add("dark");
+  }
+})();
+`;
+
 function RootShell({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         <HeadContent />
       </head>
       <body>

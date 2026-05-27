@@ -10,6 +10,12 @@ export default defineConfig(({ command }) => ({
     host: "::",
     port: 8080,
   },
+  // Pre-bundle the heavy PDF + DOCX deps on dev server start instead of paying
+  // the cost on the first user click. Without this, the first attach of a PDF
+  // can take 10-15s in dev mode while Vite traverses pdfjs-dist's tree.
+  optimizeDeps: {
+    include: ["pdfjs-dist", "mammoth"],
+  },
   resolve: {
     alias: { "@": `${process.cwd()}/src` },
     dedupe: [

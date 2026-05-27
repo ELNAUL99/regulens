@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Textarea } from "@/components/ui/textarea";
@@ -206,23 +207,26 @@ function Landing({ onEnterApp, signedIn }: { onEnterApp?: () => void; signedIn?:
               § III · Corpus
             </a>
           </nav>
-          {signedIn ? (
-            <button
-              onClick={onEnterApp}
-              className="font-mono text-[11px] uppercase tracking-[0.2em] border px-4 py-2.5 hover:bg-ink hover:text-paper transition-colors"
-              style={{ borderColor: "var(--ink)" }}
-            >
-              Open dossier →
-            </button>
-          ) : (
-            <Link
-              to="/login"
-              className="font-mono text-[11px] uppercase tracking-[0.2em] border px-4 py-2.5 hover:bg-ink hover:text-paper transition-colors"
-              style={{ borderColor: "var(--ink)" }}
-            >
-              File a use-case →
-            </Link>
-          )}
+          <div className="flex items-center gap-3">
+            {signedIn ? (
+              <button
+                onClick={onEnterApp}
+                className="font-mono text-[11px] uppercase tracking-[0.2em] border px-4 py-2.5 hover:bg-ink hover:text-paper transition-colors"
+                style={{ borderColor: "var(--ink)" }}
+              >
+                Open dossier →
+              </button>
+            ) : (
+              <Link
+                to="/login"
+                className="font-mono text-[11px] uppercase tracking-[0.2em] border px-4 py-2.5 hover:bg-ink hover:text-paper transition-colors"
+                style={{ borderColor: "var(--ink)" }}
+              >
+                File a use-case →
+              </Link>
+            )}
+            <ThemeToggle />
+          </div>
         </div>
         <div className="border-b" style={{ borderColor: "var(--rule)" }} />
         <div className="border-b mt-px" style={{ borderColor: "var(--rule)" }} />
@@ -593,6 +597,10 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
     { id: string; name: string; size: number; text: string }[]
   >([]);
   const [extracting, setExtracting] = useState(false);
+  const [extractingFile, setExtractingFile] = useState<string | null>(null);
+  const [extractProgress, setExtractProgress] = useState<{ done: number; total: number } | null>(
+    null,
+  );
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [leaderDecision, setLeaderDecision] = useState<{
     next: "assessment" | "ask_user";
@@ -621,6 +629,12 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
     onSuccess: (res) => {
       setCurrentResult(res);
       setLeaderDecision(null);
+      setLeaderAnswers({});
+      // Reset the submission form so the user lands on a fresh slate (placeholders
+      // visible again) ready for the next assessment.
+      setTitle("");
+      setUseCase("");
+      setAttachments([]);
       qc.invalidateQueries({ queryKey: ["sessions"] });
       toast.success("Assessment complete");
     },
@@ -684,45 +698,55 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
 
   async function handleFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
     setExtracting(true);
+    setExtractProgress({ done: 0, total: files.length });
+    const valid: { id: string; name: string; size: number; text: string }[] = [];
     try {
-      const next = await Promise.all(
-        Array.from(fileList).map(async (file) => {
-          if (!isAcceptedFile(file)) {
-            toast.error(`${file.name}: unsupported type. Use PDF, Word or Markdown.`);
-            return null;
+      // Process one at a time so the UI can show which file is being read and the
+      // pdfjs worker isn't overloaded with concurrent requests.
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setExtractingFile(file.name);
+        setExtractProgress({ done: i, total: files.length });
+
+        if (!isAcceptedFile(file)) {
+          toast.error(`${file.name}: unsupported type. Use PDF, Word or Markdown.`);
+          continue;
+        }
+        if (file.size > MAX_FILE_BYTES) {
+          toast.error(`${file.name}: exceeds 10 MB limit.`);
+          continue;
+        }
+        try {
+          const text = (await extractFileText(file)).trim();
+          if (!text) {
+            const isPdf = file.name.toLowerCase().endsWith(".pdf");
+            toast.error(
+              `${file.name}: no text extracted.${
+                isPdf ? " Scanned PDFs need OCR — paste the text directly instead." : ""
+              }`,
+            );
+            continue;
           }
-          if (file.size > MAX_FILE_BYTES) {
-            toast.error(`${file.name}: exceeds 10 MB limit.`);
-            return null;
-          }
-          try {
-            const text = (await extractFileText(file)).trim();
-            if (!text) {
-              toast.error(`${file.name}: no text could be extracted.`);
-              return null;
-            }
-            return {
-              id: `${file.name}-${file.size}-${crypto.randomUUID()}`,
-              name: file.name,
-              size: file.size,
-              text,
-            };
-          } catch (err) {
-            toast.error(`${file.name}: ${err instanceof Error ? err.message : "failed to read"}`);
-            return null;
-          }
-        }),
-      );
-      const valid = next.filter(
-        (file): file is { id: string; name: string; size: number; text: string } => Boolean(file),
-      );
+          valid.push({
+            id: `${file.name}-${file.size}-${crypto.randomUUID()}`,
+            name: file.name,
+            size: file.size,
+            text,
+          });
+        } catch (err) {
+          toast.error(`${file.name}: ${err instanceof Error ? err.message : "failed to read"}`);
+        }
+      }
       if (valid.length) {
         setAttachments((prev) => [...prev, ...valid]);
         toast.success(`Attached ${valid.length} file${valid.length === 1 ? "" : "s"}`);
       }
     } finally {
       setExtracting(false);
+      setExtractingFile(null);
+      setExtractProgress(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
@@ -749,7 +773,14 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
     setLoadingSessionId(id);
     try {
       const s = await getSessionFn({ data: { id } });
-      const assessment = Array.isArray(s.assessments) ? s.assessments[0] : null;
+      // Pick the most recent assessment so "Revise opinion" surfaces the new one.
+      const all = Array.isArray(s.assessments) ? s.assessments : s.assessments ? [s.assessments] : [];
+      const sorted = [...all].sort(
+        (a, b) =>
+          new Date((b as { created_at?: string }).created_at ?? 0).getTime() -
+          new Date((a as { created_at?: string }).created_at ?? 0).getTime(),
+      );
+      const assessment = sorted[0] ?? null;
       if (!assessment) {
         toast.error("No assessment found for this session");
         return;
@@ -804,23 +835,26 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
               Folio · Working
             </span>
           </button>
-          <nav className="hidden md:flex items-center gap-10 font-mono text-[11px] uppercase tracking-[0.18em] text-ink/60">
-            {onViewLanding && (
-              <button onClick={onViewLanding} className="hover:text-ink transition-colors">
-                ← Overview
+          <div className="flex items-center gap-6">
+            <nav className="hidden md:flex items-center gap-10 font-mono text-[11px] uppercase tracking-[0.18em] text-ink/60">
+              {onViewLanding && (
+                <button onClick={onViewLanding} className="hover:text-ink transition-colors">
+                  ← Overview
+                </button>
+              )}
+              <button
+                onClick={() => seedMut.mutate()}
+                disabled={seedMut.isPending}
+                className="hover:text-ink transition-colors disabled:opacity-50"
+              >
+                {seedMut.isPending ? "Seeding…" : corpusReady ? "Re-seed corpus" : "Seed corpus"}
               </button>
-            )}
-            <button
-              onClick={() => seedMut.mutate()}
-              disabled={seedMut.isPending}
-              className="hover:text-ink transition-colors disabled:opacity-50"
-            >
-              {seedMut.isPending ? "Seeding…" : corpusReady ? "Re-seed corpus" : "Seed corpus"}
-            </button>
-            <button onClick={signOut} className="hover:text-ink transition-colors">
-              Sign out
-            </button>
-          </nav>
+              <button onClick={signOut} className="hover:text-ink transition-colors">
+                Sign out
+              </button>
+            </nav>
+            <ThemeToggle />
+          </div>
         </div>
         <div className="border-b" style={{ borderColor: "var(--rule)" }} />
         <div className="border-b mt-px" style={{ borderColor: "var(--rule)" }} />
@@ -941,6 +975,9 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
                 {attachments.length > 0 &&
                   ` · ${attachments.length} exhibit${attachments.length === 1 ? "" : "s"}`}
                 {hasTrimmedSubmission && " · excerpted"}
+                {extractingFile && (
+                  <span className="ml-2 text-ink/80">· reading {extractingFile}…</span>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 <input
@@ -963,7 +1000,11 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
                   ) : (
                     <Paperclip className="size-3.5" />
                   )}
-                  {extracting ? "Reading exhibit…" : "Attach exhibit"}
+                  {extracting
+                    ? extractProgress && extractProgress.total > 1
+                      ? `Reading ${extractProgress.done + 1}/${extractProgress.total}…`
+                      : "Reading exhibit…"
+                    : "Attach exhibit"}
                 </button>
                 <button
                   type="button"
@@ -1204,7 +1245,10 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
           ) : currentResult ? (
             <>
               <AssessmentReport result={currentResult} />
-              <FollowUpChat sessionId={currentResult.sessionId} />
+              <FollowUpChat
+                sessionId={currentResult.sessionId}
+                onRevised={() => void openSession(currentResult.sessionId)}
+              />
             </>
           ) : (
             <div

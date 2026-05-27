@@ -1,7 +1,13 @@
 import { createMiddleware } from '@tanstack/react-start'
 import { getRequest } from '@tanstack/react-start/server'
 import { createClient } from '@supabase/supabase-js'
+import WebSocket from 'ws'
 import type { Database } from './types'
+
+// supabase-js bundles a Realtime client that wants a global WebSocket. Node 20
+// has no native one, so we hand it `ws`. We never actually subscribe — this
+// just stops the startup warning.
+const realtimeTransport = { transport: WebSocket as unknown as typeof globalThis.WebSocket }
 
 export const requireSupabaseAuth = createMiddleware({ type: 'function' }).server(
   async ({ next }) => {
@@ -51,6 +57,7 @@ export const requireSupabaseAuth = createMiddleware({ type: 'function' }).server
           persistSession: false,
           autoRefreshToken: false,
         },
+        realtime: realtimeTransport,
       }
     );
 

@@ -6,7 +6,7 @@ export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_EXTRACTED_CHARS = 60_000;
 const MAX_PDF_PAGES_EXTRACTED = 15;
 const PDF_PAGE_BATCH_SIZE = 2;
-const PDF_EXTRACTION_BUDGET_MS = 12_000;
+const PDF_EXTRACTION_BUDGET_MS = 25_000;
 
 let pdfWorker: Worker | null = null;
 let pdfModulePromise: Promise<typeof import("pdfjs-dist")> | null = null;
@@ -65,13 +65,20 @@ export async function extractFileText(file: File): Promise<string> {
   }
   if (ext === ".pdf") {
     const startedAt = performance.now();
+    const log = (label: string) =>
+      console.log(`[pdf:${file.name}] ${label} ${Math.round(performance.now() - startedAt)}ms`);
+
+    log("start");
     const pdfjs = await getPdfModule();
+    log("module ready");
     const buf = await file.arrayBuffer();
+    log(`arraybuffer (${buf.byteLength} bytes)`);
     const pdf = await pdfjs.getDocument({
       data: buf,
       disableFontFace: true,
       useSystemFonts: false,
     }).promise;
+    log(`document loaded (${pdf.numPages} pages)`);
     const pagesToRead = pdfPagesToRead(pdf.numPages);
     const parts: string[] = [];
     let chars = 0;
@@ -107,6 +114,7 @@ export async function extractFileText(file: File): Promise<string> {
     } finally {
       await pdf.destroy();
     }
+    log(`extraction done (${parts.join("\n\n").length} chars)`);
     return parts.join("\n\n");
   }
   throw new Error(`Unsupported file type: ${file.name}`);

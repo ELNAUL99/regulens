@@ -143,6 +143,13 @@
   --sidebar-accent-foreground: oklch(0.984 0.003 247.858);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.551 0.027 264.364);
+  /* Editorial palette in dark — deep midnight indigo paper, warm parchment
+     ink, vivid wax-seal crimson. Picked to feel like a night-edition leather
+     law journal rather than a pitch-black terminal. */
+  --paper: oklch(0.235 0.022 252);
+  --ink: oklch(0.945 0.018 78);
+  --rule: oklch(0.945 0.018 78 / 0.18);
+  --seal: oklch(0.72 0.20 28);
 }
 
 @layer base {
@@ -154,4 +161,24 @@
     background-color: var(--color-background);
     color: var(--color-foreground);
   }
+}
+
+/* Print stylesheet — used by the "Export · PDF" button (window.print). */
+@media print {
+  /* Force the light editorial palette for the printed page even in dark mode. */
+  :root, .dark {
+    --paper: oklch(1 0 0);
+    --ink: oklch(0.15 0 0);
+    --rule: oklch(0.15 0 0 / 0.18);
+    --seal: oklch(0.42 0.16 28);
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.15 0 0);
+  }
+  body { background: #fff !important; color: #000 !important; }
+  /* Hide chrome that's irrelevant on paper. */
+  header nav, [aria-label="Follow-up chat"], button { display: none !important; }
+  /* Don't break sections awkwardly. */
+  section, header { break-inside: avoid; page-break-inside: avoid; }
+  /* Tighter margins. */
+  @page { margin: 18mm; }
 }

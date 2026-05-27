@@ -1,17 +1,25 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Loader2, Send, MessageSquare } from "lucide-react";
+import { Loader2, Send, MessageSquare, RotateCw } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { listMessages, sendMessage } from "@/lib/chat.functions";
+import { reviseAssessment } from "@/lib/assessment.functions";
 
 type Msg = { id: string; role: "user" | "assistant"; content: string; created_at: string };
 
-export function FollowUpChat({ sessionId }: { sessionId: string }) {
+export function FollowUpChat({
+  sessionId,
+  onRevised,
+}: {
+  sessionId: string;
+  onRevised?: () => void;
+}) {
   const qc = useQueryClient();
   const listFn = useServerFn(listMessages);
   const sendFn = useServerFn(sendMessage);
+  const reviseFn = useServerFn(reviseAssessment);
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -25,6 +33,19 @@ export function FollowUpChat({ sessionId }: { sessionId: string }) {
     onSuccess: () => {
       setDraft("");
       qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const revise = useMutation({
+    mutationFn: (additionalContext: string) =>
+      reviseFn({ data: { sessionId, additionalContext } }),
+    onSuccess: () => {
+      setDraft("");
+      qc.invalidateQueries({ queryKey: ["messages", sessionId] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      toast.success("Assessment revised with your new information");
+      onRevised?.();
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -113,22 +134,31 @@ export function FollowUpChat({ sessionId }: { sessionId: string }) {
               className="font-serif text-base rounded-none border-ink/30 focus-visible:ring-0 focus-visible:border-ink"
               disabled={send.isPending}
             />
-            <button
-              type="submit"
-              disabled={send.isPending || !draft.trim()}
-              className="font-mono text-[11px] uppercase tracking-[0.2em] py-3.5 px-5 text-paper transition-opacity hover:opacity-90 disabled:opacity-40 inline-flex items-center gap-2 shrink-0"
-              style={{ background: "var(--ink)" }}
-            >
-              {send.isPending ? (
-                <Loader2 className="size-3 animate-spin" />
-              ) : (
-                <Send className="size-3" />
-              )}
-              Submit
-            </button>
+            <div className="flex flex-col gap-2 shrink-0">
+              <button
+                type="submit"
+                disabled={send.isPending || revise.isPending || !draft.trim()}
+                className="font-mono text-[11px] uppercase tracking-[0.2em] py-3.5 px-5 text-paper transition-opacity hover:opacity-90 disabled:opacity-40 inline-flex items-center gap-2"
+                style={{ background: "var(--ink)" }}
+              >
+                {send.isPending ? <Loader2 className="size-3 animate-spin" /> : <Send className="size-3" />}
+                Submit
+              </button>
+              <button
+                type="button"
+                disabled={revise.isPending || send.isPending || draft.trim().length < 10}
+                onClick={() => revise.mutate(draft.trim())}
+                className="font-mono text-[11px] uppercase tracking-[0.2em] py-3.5 px-5 border transition-colors hover:bg-ink/5 disabled:opacity-40 inline-flex items-center gap-2"
+                style={{ borderColor: "var(--ink)" }}
+                title="Re-run the council with this text as additional context. Stores a new assessment row."
+              >
+                {revise.isPending ? <Loader2 className="size-3 animate-spin" /> : <RotateCw className="size-3" />}
+                Revise opinion
+              </button>
+            </div>
           </form>
           <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-ink/40">
-            ⌘/Ctrl + Enter to send
+            ⌘/Ctrl + Enter to send · "Revise opinion" re-runs the council with your text as new context
           </p>
         </div>
       </div>

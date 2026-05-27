@@ -11,10 +11,12 @@ import {
 } from "./llm.server";
 import {
   AssessmentSchema,
+  CritiqueSchema,
   FactsSchema,
   SufficiencySchema,
   validate,
   type Assessment,
+  type Critique,
   type Facts,
 } from "./assessment-schemas";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -68,14 +70,25 @@ async function extractFacts(useCase: string): Promise<Facts> {
 - data_subjects: who is affected (e.g. "EU pupils", "job applicants", "consumers")
 - decision_stakes: "low" | "medium" | "high"
 - automation_level: "decision-support" | "automated-decision"
+- human_oversight: short string — how humans review or override outputs ("none" / "approve each output" / "spot-check" / etc.)
 - biometric_or_emotion: boolean — does it process biometric data or infer emotions?
 - workplace_or_education: boolean
 - public_authority: boolean
 - publicly_accessible_space: boolean — is it deployed in a publicly accessible space (airport, train/metro station, stadium, mall, street, square, public transport)?
 - real_time_remote_biometric_id: boolean — does it perform real-time remote biometric identification of natural persons (e.g. live facial recognition against a watchlist or to flag unknown/unauthorised individuals)?
 - law_enforcement_context: boolean — is it used by, on behalf of, or in close cooperation with police, border, customs, intelligence, or other security/law-enforcement authorities (including airport/transport security and private security acting under a public-safety mandate)?
+- ai_generated_content: boolean — does the system generate or substantially alter text, images, audio, or video that could appear as authentic content (Art. 50(4) labelling)?
+- gpai_use: boolean — does the system rely on or integrate a general-purpose AI model (e.g. GPT-class LLM, image-generation foundation model)?
+- gpai_role: "provider" | "downstream-deployer" | "none" | "unknown" — provider if the entity trains/places-on-market the GPAI itself; downstream-deployer if it merely integrates someone else's GPAI
+- impact_on_people: short string — concrete impact on natural persons (e.g. "may affect job offers", "denies access to credit", "no individual impact").
 - role_hint: "provider" | "deployer" | "both" | "unknown"
-- missing_info: array of short strings — important facts not present in the description${UNTRUSTED_INPUT_DIRECTIVE}`;
+- missing_info: array of short strings — important facts not present in the description
+
+Guidance on role_hint:
+- "provider"  = the entity DEVELOPS the AI system (or has it developed) and places it on the market or puts it into service under its own name.
+- "deployer"  = the entity USES the AI system under its own authority.
+- "both"      = the SAME entity both develops AND operates the system itself (e.g. a consultancy that builds a model and also runs / hosts / monitors / retrains it on behalf of clients, or a SaaS vendor that both ships and operates the service). Vendor case studies often describe this pattern — do not default to "provider" if the description also shows operating, managed-service, hosting, monitoring, or retraining responsibilities.
+- "unknown"   = the description is silent on who develops vs operates.${UNTRUSTED_INPUT_DIRECTIVE}`;
   const out = await verdaChat({
     messages: [
       { role: "system", content: sys },
@@ -105,6 +118,10 @@ async function councilAssess(
 Return STRICT JSON with this schema:
 {
   "summary": string,                              // 2-3 sentence neutral summary
+  "is_ai_system": {                               // gate per Art. 3(1)
+    "qualifies": boolean,
+    "rationale": string                           // 2-3 sentences mapping to the Art. 3(1) criteria
+  },
   "role_determination": "provider" | "deployer" | "both" | "unclear",
   "risk_tier": "prohibited" | "high" | "limited" | "minimal" | "gpai" | "unclear",
   "art5_banner": { "triggered": boolean, "letter": string | null, "rationale": string },
@@ -113,12 +130,33 @@ Return STRICT JSON with this schema:
     "annex_iii_point": string | null              // e.g. "Annex III §4" if applicable
   },
   "governance_observations": {
-    "transparency_art50": string | null,          // duties under Art. 50 if any
-    "deployer_duties_art26": string | null,
-    "fria_art27_required": boolean,
-    "art86_right_to_explanation": boolean,
-    "value_chain_art25": string | null
+    "transparency_art50": string | null,                  // user-facing transparency (chatbots, deepfakes, AI-generated content)
+    "deployer_duties_art26": string | null,               // logging, monitoring, instructions for use, AI literacy, notice to workers
+    "fria_art27_required": boolean,                       // Fundamental Rights Impact Assessment for public bodies / certain high-risk
+    "art86_right_to_explanation": boolean,                // right to an explanation of individual decision
+    "value_chain_art25": string | null,                   // provider / distributor / importer / authorised representative duties
+    "technical_documentation_art11": string | null,       // Annex IV technical documentation duties for high-risk providers
+    "record_keeping_art12": string | null,                // automatic event logging / traceability
+    "human_oversight_art14": string | null,               // human-in-the-loop measures (stop button, escalation, review)
+    "quality_management_art17": string | null,            // QMS for high-risk providers
+    "post_market_monitoring_art72": string | null,        // post-market monitoring system
+    "serious_incident_reporting_art73": string | null     // 15-day reporting of serious incidents
   },
+  "gpai_obligations": {                           // dedicated GPAI path; set applies=false and role="none" if not a GPAI scenario
+    "applies": boolean,
+    "role": "provider" | "downstream-deployer" | "none",
+    "transparency_art53": string | null,          // Art. 53 GPAI provider duties (technical doc, training-data summary)
+    "copyright_compliance": string | null,        // Art. 53(1)(c) copyright policy
+    "systemic_risk_art55": string | null,         // Art. 55 systemic-risk model duties
+    "notes": string | null
+  },
+  "adjacent_frameworks": [                        // bonus: GDPR / DSA / sector-specific rules that may also apply
+    { "framework": string, "relevance": string }
+  ],
+  "assumptions": string[],                        // explicit assumptions the council made due to gaps in the input
+  "next_steps": [                                 // actionable checklist derived from governance + missing info
+    { "item": string, "basis": string, "priority": "high" | "medium" | "low" }
+  ],
   "missing_info": string[],                       // facts that, if known, would change the conclusion
   "citations": [
     { "tag": string, "quote": string }            // tag MUST match one of the provided excerpt tags; quote is a short excerpt you used
@@ -131,6 +169,7 @@ Return STRICT JSON with this schema:
 }
 
 Rules:
+- FIRST, decide whether the described technology qualifies as an AI system under Article 3(1). The five cumulative criteria are: (i) machine-based, (ii) designed to operate with varying levels of autonomy, (iii) may exhibit adaptiveness after deployment, (iv) for explicit or implicit objectives, infers from inputs how to generate outputs (predictions, content, recommendations, decisions), (v) those outputs can influence physical or virtual environments. Pure rule-based systems with no learned inference, basic statistical reporting, plain optimisation, and deterministic spreadsheet logic do NOT qualify on their own. If the system clearly fails one or more criteria, set is_ai_system.qualifies=false, set risk_tier="minimal", set art5_banner.triggered=false, and explain in is_ai_system.rationale which criterion fails — the rest of the assessment can then be brief.
 - If the use-case falls under any Article 5 prohibition, set art5_banner.triggered=true and risk_tier="prohibited". The Article 5(1) prohibitions are:
   (a) subliminal / purposefully manipulative / deceptive techniques causing significant harm;
   (b) exploitation of vulnerabilities (age, disability, social/economic situation) causing significant harm;
@@ -145,7 +184,8 @@ Rules:
 - When biometric/public-space/law-enforcement facts are ambiguous, prefer "prohibited" with a lower confidence and list the missing facts that would move it to "high", rather than defaulting to "high".
 - Otherwise apply Article 6 + Annex III to determine high-risk.
 - Generative/conversational AI without high-risk use is typically "limited" with Art. 50 transparency duties.
-- Never invent citations. If you have insufficient grounding, lower confidence and list what's missing.${UNTRUSTED_INPUT_DIRECTIVE}`;
+- Never invent citations. If you have insufficient grounding, lower confidence and list what's missing.
+- For role_determination: return "both" when the SAME entity both DEVELOPS the system AND OPERATES it under its own authority (typical for consultancies that build + run a model for clients, or SaaS vendors that ship + host the service). Do not default to "provider" merely because the entity built the system — if the description also mentions operating, hosting, managed service, monitoring, retraining, or running the system on behalf of others, that is the deployer side and the correct answer is "both". Use the extracted facts' role_hint as a signal but override it when the description clearly shows both sides.${UNTRUSTED_INPUT_DIRECTIVE}`;
 
   const user = `## Use-case (untrusted user submission)
 ${wrapUntrustedInput(useCase)}
@@ -175,22 +215,118 @@ Produce the JSON now.`;
   return { ok: true, assessment: result.value };
 }
 
-/** Stage 3 — Verifier: ensure citations are grounded in the retrieved chunks. */
+/**
+ * Stage 3a — Red-team critique (Mistral). Argues the OPPOSITE risk tier and
+ * either confirms or recommends a revision. Cheap second-opinion pass; its
+ * output is shown in the report so a reviewer can see the counter-case.
+ */
+async function redTeamCritique(
+  useCase: string,
+  facts: unknown,
+  context: string,
+  council: Assessment,
+): Promise<Critique | null> {
+  // Pick the most defensible counter-tier: if council said high → challenge "limited" or "prohibited"; if minimal → challenge "high"; etc.
+  const opposite: Record<string, string> = {
+    prohibited: "high",
+    high: "minimal",
+    limited: "high",
+    minimal: "high",
+    gpai: "high",
+    unclear: "high",
+  };
+  const challenge = opposite[council.risk_tier] ?? "high";
+
+  const sys = `You are a RED-TEAM critic for an EU AI Act assessment. The council has produced an opinion. Your job is to argue the strongest possible case for a DIFFERENT risk_tier ("${challenge}") and surface weaknesses in the council's reasoning. Then deliver a verdict: "confirm" (council was right) or "revise" (you found a real problem).
+
+Return STRICT JSON:
+{
+  "challenged_risk_tier": "prohibited" | "high" | "limited" | "minimal" | "gpai" | "unclear",
+  "steel_man": string,                            // the strongest case for the challenged tier, in 2-3 sentences, citing only the provided AI Act excerpts by tag
+  "weaknesses_found": string[],                   // specific weaknesses in the council's reasoning (ungrounded inferences, missed Annex III categories, etc.)
+  "verdict": "confirm" | "revise",
+  "recommended_risk_tier": "prohibited" | "high" | "limited" | "minimal" | "gpai" | "unclear" | null,  // null if verdict="confirm"
+  "recommended_changes": string[]                 // [] if verdict="confirm"
+}
+
+Rules:
+- Cite only the AI Act excerpt tags provided. Never invent.
+- "confirm" the council if the steel-man does not hold up under the provided excerpts.
+- "revise" only when you find a concrete, citation-grounded problem.${UNTRUSTED_INPUT_DIRECTIVE}`;
+
+  const user = `## Use-case (untrusted user submission)
+${wrapUntrustedInput(useCase)}
+
+## Extracted facts
+${JSON.stringify(facts, null, 2)}
+
+## Council opinion
+${JSON.stringify(
+    {
+      risk_tier: council.risk_tier,
+      role_determination: council.role_determination,
+      art5_banner: council.art5_banner,
+      preliminary_assessment: council.preliminary_assessment,
+      citations: council.citations,
+      confidence: council.confidence,
+    },
+    null,
+    2,
+  )}
+
+## Retrieved AI Act excerpts
+${context}
+
+Argue the case for risk_tier="${challenge}" and then deliver your verdict.`;
+
+  const out = await mistralChat({
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: user },
+    ],
+    temperature: 0.2,
+    json: true,
+    max_tokens: 1800,
+  });
+  const parsed = safeJSONParse(out);
+  const result = validate(CritiqueSchema, parsed);
+  if (!result.ok) {
+    console.warn(`[redTeam] invalid LLM output: ${result.reason}`);
+    return null;
+  }
+  return result.value;
+}
+
+/** Stage 3 — Verifier: ensure citations are grounded in the retrieved chunks
+ *  and enrich each citation with its source_type so the UI can badge it. */
 function verifyCitations(
   assessment: Assessment,
   chunks: RetrievedChunk[],
 ): { assessment: Assessment; verifier_notes: string[] } {
   const notes: string[] = [];
-  const allowed = new Set(
-    chunks.map((c) => (c.annex_point ? `${c.article_id} §${c.annex_point}` : c.article_id)),
-  );
+  const tagToSource = new Map<string, string>();
+  const allowed = new Set<string>();
+  for (const c of chunks) {
+    const fullTag = c.annex_point ? `${c.article_id} §${c.annex_point}` : c.article_id;
+    allowed.add(fullTag);
+    tagToSource.set(fullTag, c.source_type);
+    if (!tagToSource.has(c.article_id)) tagToSource.set(c.article_id, c.source_type);
+  }
   const cites = assessment.citations;
-  const kept = cites.filter((c) => {
-    // Allow exact match or just article match (drop §point).
-    if (allowed.has(c.tag)) return true;
-    const articleOnly = c.tag.split(" §")[0];
-    return allowed.has(articleOnly) || [...allowed].some((a) => a.startsWith(articleOnly));
-  });
+  const kept = cites
+    .filter((c) => {
+      // Allow exact match or just article match (drop §point).
+      if (allowed.has(c.tag)) return true;
+      const articleOnly = c.tag.split(" §")[0];
+      return allowed.has(articleOnly) || [...allowed].some((a) => a.startsWith(articleOnly));
+    })
+    .map((c) => {
+      // Attach source_type so the UI can render "Legislation / Guidance /
+      // National" badges next to each citation.
+      const source =
+        tagToSource.get(c.tag) ?? tagToSource.get(c.tag.split(" §")[0]) ?? "regulation";
+      return { ...c, source_type: source } as typeof c & { source_type: string };
+    });
   if (kept.length < cites.length) {
     notes.push(`Dropped ${cites.length - kept.length} ungrounded citation(s).`);
   }
@@ -253,6 +389,14 @@ export const runAssessment = createServerFn({ method: "POST" })
       // 5. Verifier.
       const { assessment, verifier_notes } = verifyCitations(council.assessment, chunks);
 
+      // 5a. Red-team critique (parallel-safe to run after verifier).
+      const critique = await redTeamCritique(
+        data.useCase,
+        facts,
+        formatContext(chunks),
+        assessment,
+      );
+
       // 6. Persist.
       const { data: saved, error: aErr } = await supabase
         .from("assessments")
@@ -261,7 +405,21 @@ export const runAssessment = createServerFn({ method: "POST" })
           status: "final",
           summary: assessment.summary,
           facts: facts as never,
-          preliminary_assessment: assessment.preliminary_assessment as never,
+          // Fold the Art. 3(1) gate into preliminary_assessment so we don't
+          // need a DB column for it. The UI reads it back from the same blob.
+          // Fold the Art. 3(1) gate, GPAI obligations, adjacent frameworks,
+          // assumptions, and next-steps checklist into preliminary_assessment
+          // JSONB so we don't need new DB columns. The UI reads them back from
+          // the same blob.
+          preliminary_assessment: {
+            ...assessment.preliminary_assessment,
+            is_ai_system: assessment.is_ai_system,
+            gpai_obligations: assessment.gpai_obligations,
+            adjacent_frameworks: assessment.adjacent_frameworks,
+            assumptions: assessment.assumptions,
+            next_steps: assessment.next_steps,
+            critique,
+          } as never,
           governance_observations: assessment.governance_observations as never,
           missing_info: assessment.missing_info as never,
           citations: assessment.citations as never,
@@ -350,6 +508,98 @@ export const clearSessions = createServerFn({ method: "POST" })
     const { error } = await supabase.from("sessions").delete().in("id", ids);
     if (error) throw new Error(error.message);
     return { deleted: ids.length };
+  });
+
+/**
+ * Re-run the council for an existing session, folding in additional context
+ * the user supplied in chat. Stores a NEW assessment row so the original
+ * stays as a baseline for comparison.
+ */
+export const reviseAssessment = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d) =>
+    z
+      .object({
+        sessionId: z.string().uuid(),
+        additionalContext: z.string().min(1).max(8000),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+
+    // Load the session + original document.
+    const { data: session, error: sErr } = await supabase
+      .from("sessions")
+      .select("id, user_id, documents(content)")
+      .eq("id", data.sessionId)
+      .single();
+    if (sErr || !session) throw new Error("Session not found");
+    if (session.user_id !== userId) throw new Error("Forbidden");
+    const doc = Array.isArray(session.documents) ? session.documents[0] : session.documents;
+    const original = (doc?.content as string | undefined) ?? "";
+
+    const merged =
+      `${original}\n\n--- Additional information supplied by the user ---\n${data.additionalContext}`.slice(
+        0,
+        20_000,
+      );
+
+    // Re-run the pipeline.
+    const facts = await extractFacts(merged);
+    const chunks = await retrieve(
+      supabase,
+      `${merged}\n\nFacts: ${JSON.stringify(facts).slice(0, 1000)}`,
+      24,
+    );
+    const council = await councilAssess(merged, facts, formatContext(chunks));
+    if (!council.ok) {
+      throw new Error(`Council output failed validation: ${council.reason}`);
+    }
+    const { assessment, verifier_notes } = verifyCitations(council.assessment, chunks);
+    const critique = await redTeamCritique(merged, facts, formatContext(chunks), assessment);
+
+    const { data: saved, error: aErr } = await supabase
+      .from("assessments")
+      .insert({
+        session_id: session.id,
+        status: "revised",
+        summary: assessment.summary,
+        facts: facts as never,
+        preliminary_assessment: {
+          ...assessment.preliminary_assessment,
+          is_ai_system: assessment.is_ai_system,
+          gpai_obligations: assessment.gpai_obligations,
+          adjacent_frameworks: assessment.adjacent_frameworks,
+          assumptions: assessment.assumptions,
+          next_steps: assessment.next_steps,
+          critique,
+          revised_from_context: data.additionalContext,
+        } as never,
+        governance_observations: assessment.governance_observations as never,
+        missing_info: assessment.missing_info as never,
+        citations: assessment.citations as never,
+        confidence: assessment.confidence as never,
+        art5_banner: assessment.art5_banner as never,
+        role_determination: assessment.role_determination,
+        risk_tier: assessment.risk_tier,
+      })
+      .select()
+      .single();
+    if (aErr) throw new Error(`Save failed: ${aErr.message}`);
+
+    return {
+      sessionId: session.id,
+      assessmentId: saved!.id,
+      assessment: saved,
+      retrieved: chunks.map((c) => ({
+        tag: c.annex_point ? `${c.article_id} §${c.annex_point}` : c.article_id,
+        title: c.title,
+        source_type: c.source_type,
+        similarity: c.similarity,
+      })),
+      verifier_notes,
+    };
   });
 
 /** Pre-assessment: ask the small model whether the use-case has enough information

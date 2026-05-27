@@ -1,4 +1,4 @@
-import { AlertTriangle, Download } from "lucide-react";
+import { AlertTriangle, Download, Printer } from "lucide-react";
 
 type Result = {
   sessionId: string;
@@ -62,9 +62,36 @@ export function AssessmentReport({ result }: { result: Result }) {
   const prelim = (a.preliminary_assessment ?? {}) as {
     rationale?: string;
     annex_iii_point?: string | null;
+    is_ai_system?: { qualifies?: boolean; rationale?: string };
+    gpai_obligations?: {
+      applies?: boolean;
+      role?: "provider" | "downstream-deployer" | "none";
+      transparency_art53?: string | null;
+      copyright_compliance?: string | null;
+      systemic_risk_art55?: string | null;
+      notes?: string | null;
+    };
+    adjacent_frameworks?: { framework: string; relevance: string }[];
+    assumptions?: string[];
+    next_steps?: { item: string; basis: string; priority: "high" | "medium" | "low" }[];
+    critique?: {
+      challenged_risk_tier: string;
+      steel_man: string;
+      weaknesses_found: string[];
+      verdict: "confirm" | "revise";
+      recommended_risk_tier: string | null;
+      recommended_changes: string[];
+    } | null;
   };
+  const aiGate = prelim.is_ai_system ?? { qualifies: true, rationale: "" };
+  const gpai = prelim.gpai_obligations;
+  const adjacent = prelim.adjacent_frameworks ?? [];
+  const assumptions = prelim.assumptions ?? [];
+  const llmNextSteps = prelim.next_steps ?? [];
+  const critique = prelim.critique ?? null;
   const gov = (a.governance_observations ?? {}) as Record<string, unknown>;
-  const citations = (a.citations as { tag: string; quote: string }[] | undefined) ?? [];
+  const citations =
+    (a.citations as { tag: string; quote: string; source_type?: string }[] | undefined) ?? [];
   const missing = (a.missing_info as string[] | undefined) ?? [];
   const conf = (a.confidence ?? {}) as Record<string, number>;
 
@@ -78,6 +105,24 @@ export function AssessmentReport({ result }: { result: Result }) {
     { k: "Art. 27 FRIA required", v: gov.fria_art27_required ? "Yes" : "No" },
     { k: "Art. 86 right to explanation", v: gov.art86_right_to_explanation ? "Yes" : "No" },
     gov.value_chain_art25 && { k: "Art. 25 value chain", v: String(gov.value_chain_art25) },
+    gov.technical_documentation_art11 && {
+      k: "Art. 11 technical documentation",
+      v: String(gov.technical_documentation_art11),
+    },
+    gov.record_keeping_art12 && { k: "Art. 12 record-keeping", v: String(gov.record_keeping_art12) },
+    gov.human_oversight_art14 && { k: "Art. 14 human oversight", v: String(gov.human_oversight_art14) },
+    gov.quality_management_art17 && {
+      k: "Art. 17 quality management",
+      v: String(gov.quality_management_art17),
+    },
+    gov.post_market_monitoring_art72 && {
+      k: "Art. 72 post-market monitoring",
+      v: String(gov.post_market_monitoring_art72),
+    },
+    gov.serious_incident_reporting_art73 && {
+      k: "Art. 73 serious-incident reporting",
+      v: String(gov.serious_incident_reporting_art73),
+    },
   ].filter(Boolean) as { k: string; v: string }[];
 
   // ---- Next-steps checklist, derived from the assessment ----
@@ -152,6 +197,14 @@ export function AssessmentReport({ result }: { result: Result }) {
   for (const m of missing.slice(0, 5)) {
     checklist.push({ item: `Gather missing information: ${m}`, why: "Flagged by the council as needed to firm up the assessment." });
   }
+  // Merge in the LLM-generated next_steps (de-duplicate by item text).
+  const seen = new Set(checklist.map((c) => c.item.toLowerCase()));
+  for (const s of llmNextSteps) {
+    if (!seen.has(s.item.toLowerCase())) {
+      checklist.push({ item: s.item, why: s.basis });
+      seen.add(s.item.toLowerCase());
+    }
+  }
 
   function downloadMarkdown() {
     const lines: string[] = [];
@@ -163,6 +216,14 @@ export function AssessmentReport({ result }: { result: Result }) {
     if (prelim.annex_iii_point) lines.push(`- **Annex III point:** ${prelim.annex_iii_point}`);
     lines.push(`- **Confidence (overall):** ${Math.round((conf.overall ?? 0) * 100)}%`);
     lines.push("");
+    if (aiGate.qualifies === false) {
+      lines.push(`## Art. 3(1) gate — does not appear to qualify as an AI system`);
+      lines.push("");
+      lines.push(aiGate.rationale ?? "Fails one or more Article 3(1) criteria.");
+      lines.push("");
+      lines.push("_The EU AI Act does not apply. The classification below is informational only._");
+      lines.push("");
+    }
     if (art5.triggered) {
       lines.push(`## Article 5 prohibition${art5.letter ? ` (Art. 5(1)(${art5.letter}))` : ""}`);
       lines.push("");
@@ -200,8 +261,52 @@ export function AssessmentReport({ result }: { result: Result }) {
     if (citations.length) {
       lines.push(`## 6. Authorities cited`);
       lines.push("");
-      for (const c of citations) lines.push(`- **${c.tag}** — "${c.quote}"`);
+      for (const c of citations) {
+        const badge = c.source_type ? ` [${c.source_type}]` : "";
+        lines.push(`- **${c.tag}**${badge} — "${c.quote}"`);
+      }
       lines.push("");
+    }
+    if (gpai?.applies) {
+      lines.push(`## GPAI obligations (${gpai.role})`);
+      lines.push("");
+      if (gpai.transparency_art53) lines.push(`- **Art. 53 transparency:** ${gpai.transparency_art53}`);
+      if (gpai.copyright_compliance) lines.push(`- **Art. 53(1)(c) copyright:** ${gpai.copyright_compliance}`);
+      if (gpai.systemic_risk_art55) lines.push(`- **Art. 55 systemic risk:** ${gpai.systemic_risk_art55}`);
+      if (gpai.notes) lines.push(`- ${gpai.notes}`);
+      lines.push("");
+    }
+    if (assumptions.length) {
+      lines.push(`## Assumptions`);
+      lines.push("");
+      for (const a of assumptions) lines.push(`- ${a}`);
+      lines.push("");
+    }
+    if (adjacent.length) {
+      lines.push(`## Adjacent frameworks (outside the AI Act)`);
+      lines.push("");
+      for (const fw of adjacent) lines.push(`- **${fw.framework}:** ${fw.relevance}`);
+      lines.push("");
+    }
+    if (critique) {
+      lines.push(`## Red-team critique`);
+      lines.push("");
+      lines.push(
+        `**Verdict:** ${critique.verdict}${critique.verdict === "revise" ? ` → ${critique.recommended_risk_tier ?? critique.challenged_risk_tier}` : ""}`,
+      );
+      lines.push("");
+      lines.push(`**Steel-man for ${critique.challenged_risk_tier}:** ${critique.steel_man}`);
+      lines.push("");
+      if (critique.weaknesses_found.length) {
+        lines.push(`**Weaknesses flagged:**`);
+        for (const w of critique.weaknesses_found) lines.push(`- ${w}`);
+        lines.push("");
+      }
+      if (critique.recommended_changes.length) {
+        lines.push(`**Recommended changes:**`);
+        for (const c of critique.recommended_changes) lines.push(`- ${c}`);
+        lines.push("");
+      }
     }
     if (result.retrieved.length) {
       lines.push(`## 7. Corpus consulted`);
@@ -248,6 +353,17 @@ export function AssessmentReport({ result }: { result: Result }) {
               <Download className="size-3" strokeWidth={1.5} />
               <span>Export · .md</span>
             </button>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 border px-2.5 py-1 hover:bg-ink hover:text-paper transition-colors"
+              style={{ borderColor: "var(--ink)" }}
+              aria-label="Print or save as PDF"
+              title="Use your browser's print dialog → Save as PDF"
+            >
+              <Printer className="size-3" strokeWidth={1.5} />
+              <span>Export · PDF</span>
+            </button>
           </div>
         </div>
       </div>
@@ -289,6 +405,32 @@ export function AssessmentReport({ result }: { result: Result }) {
           )}
         </div>
       </header>
+
+      {/* Art. 3(1) gate — "is this an AI system at all?" */}
+      {aiGate.qualifies === false && (
+        <div
+          className="border-t border-b py-6 mb-12 grid md:grid-cols-12 gap-8"
+          style={{
+            borderColor: "var(--ink)",
+            background: "color-mix(in oklab, var(--ink) 4%, transparent)",
+          }}
+        >
+          <div className="md:col-span-2 font-mono text-[10px] uppercase tracking-[0.25em] text-ink/70">
+            Gate · Art. 3(1)
+          </div>
+          <div className="md:col-span-10">
+            <div className="font-serif text-2xl tracking-tight">
+              Does not appear to qualify as an AI system
+            </div>
+            <p className="mt-2 font-serif text-base text-ink/80 leading-snug">
+              {aiGate.rationale || "The system fails one or more Article 3(1) criteria."}
+            </p>
+            <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/50">
+              The EU AI Act does not apply. The downstream classification below is therefore informational only.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Article 5 banner — bench order */}
       {art5.triggered && (
@@ -432,6 +574,145 @@ export function AssessmentReport({ result }: { result: Result }) {
         </section>
       )}
 
+      {/* Red-team critique — dissenting opinion */}
+      {critique && (
+        <section className="border-t pt-10 pb-12" style={{ borderColor: "var(--rule)" }}>
+          <SectionHead
+            part="Dissent"
+            title={
+              critique.verdict === "confirm"
+                ? `Red-team challenged ${critique.challenged_risk_tier} — council confirmed`
+                : `Red-team recommends revision to ${critique.recommended_risk_tier ?? critique.challenged_risk_tier}`
+            }
+          />
+          <div className="grid md:grid-cols-12 gap-8">
+            <div className="hidden md:block md:col-span-2" />
+            <div className="md:col-span-10 space-y-4">
+              <p
+                className="font-serif italic text-lg leading-snug text-ink/85 border-l-2 pl-4"
+                style={{ borderColor: "var(--seal)" }}
+              >
+                {critique.steel_man}
+              </p>
+              {critique.weaknesses_found.length > 0 && (
+                <div>
+                  <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-ink/50 mb-2">
+                    Weaknesses flagged
+                  </div>
+                  <ul className="space-y-1 font-serif text-base text-ink/80">
+                    {critique.weaknesses_found.map((w, i) => (
+                      <li key={i}>• {w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {critique.verdict === "revise" && critique.recommended_changes.length > 0 && (
+                <div>
+                  <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-ink/50 mb-2">
+                    Recommended changes
+                  </div>
+                  <ul className="space-y-1 font-serif text-base text-ink/80">
+                    {critique.recommended_changes.map((c, i) => (
+                      <li key={i}>• {c}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* GPAI obligations */}
+      {gpai?.applies && (
+        <section className="border-t pt-10 pb-12" style={{ borderColor: "var(--rule)" }}>
+          <SectionHead part="GPAI" title={`General-purpose AI · ${gpai.role}`} />
+          <div className="grid md:grid-cols-12 gap-8">
+            <div className="hidden md:block md:col-span-2" />
+            <div className="md:col-span-10">
+              <dl className="grid gap-y-3">
+                {gpai.transparency_art53 && (
+                  <div className="grid md:grid-cols-12 gap-2 py-2 border-t" style={{ borderColor: "var(--rule)" }}>
+                    <dt className="md:col-span-4 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/60">
+                      Art. 53 transparency
+                    </dt>
+                    <dd className="md:col-span-8 font-serif text-base text-ink/85">{gpai.transparency_art53}</dd>
+                  </div>
+                )}
+                {gpai.copyright_compliance && (
+                  <div className="grid md:grid-cols-12 gap-2 py-2 border-t" style={{ borderColor: "var(--rule)" }}>
+                    <dt className="md:col-span-4 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/60">
+                      Art. 53(1)(c) copyright
+                    </dt>
+                    <dd className="md:col-span-8 font-serif text-base text-ink/85">{gpai.copyright_compliance}</dd>
+                  </div>
+                )}
+                {gpai.systemic_risk_art55 && (
+                  <div className="grid md:grid-cols-12 gap-2 py-2 border-t" style={{ borderColor: "var(--rule)" }}>
+                    <dt className="md:col-span-4 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/60">
+                      Art. 55 systemic risk
+                    </dt>
+                    <dd className="md:col-span-8 font-serif text-base text-ink/85">{gpai.systemic_risk_art55}</dd>
+                  </div>
+                )}
+                {gpai.notes && (
+                  <div className="grid md:grid-cols-12 gap-2 py-2 border-t" style={{ borderColor: "var(--rule)" }}>
+                    <dt className="md:col-span-4 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/60">
+                      Notes
+                    </dt>
+                    <dd className="md:col-span-8 font-serif text-base text-ink/85">{gpai.notes}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Assumptions — separated from rationale per challenge requirement */}
+      {assumptions.length > 0 && (
+        <section className="border-t pt-10 pb-12" style={{ borderColor: "var(--rule)" }}>
+          <SectionHead part="Caveats" title="Assumptions the council relied on" />
+          <div className="grid md:grid-cols-12 gap-8">
+            <div className="hidden md:block md:col-span-2" />
+            <div className="md:col-span-10">
+              <ul className="space-y-2 font-serif text-base text-ink/80">
+                {assumptions.map((a, i) => (
+                  <li key={i} className="border-l-2 pl-4" style={{ borderColor: "var(--rule)" }}>
+                    {a}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Adjacent frameworks — bonus */}
+      {adjacent.length > 0 && (
+        <section className="border-t pt-10 pb-12" style={{ borderColor: "var(--rule)" }}>
+          <SectionHead part="Bonus" title="Adjacent legal frameworks possibly engaged" />
+          <div className="grid md:grid-cols-12 gap-8">
+            <div className="hidden md:block md:col-span-2" />
+            <div className="md:col-span-10">
+              <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-ink/50 mb-3">
+                Outside the AI Act — flagged for separate review by counsel.
+              </p>
+              <ul className="space-y-3 font-serif text-base text-ink/85">
+                {adjacent.map((fw, i) => (
+                  <li key={i}>
+                    <span className="font-mono text-[11px] uppercase tracking-[0.15em] text-ink/70 mr-2">
+                      {fw.framework}
+                    </span>
+                    {fw.relevance}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </section>
+      )}
+
       {/* IV. Citations — table of authorities */}
       <section className="border-t pt-10 pb-12" style={{ borderColor: "var(--rule)" }}>
         <SectionHead part="Part IV" title="Authorities cited" />
@@ -452,11 +733,34 @@ export function AssessmentReport({ result }: { result: Result }) {
                       {String(i + 1).padStart(2, "0")}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <div
-                        className="font-mono text-[11px] uppercase tracking-[0.15em]"
-                        style={{ color: "var(--seal)" }}
-                      >
-                        {c.tag}
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <div
+                          className="font-mono text-[11px] uppercase tracking-[0.15em]"
+                          style={{ color: "var(--seal)" }}
+                        >
+                          {c.tag}
+                        </div>
+                        {c.source_type && (
+                          <span
+                            className="font-mono text-[9px] uppercase tracking-[0.18em] px-1.5 py-0.5 border"
+                            style={{
+                              borderColor: "var(--rule)",
+                              color: "var(--ink)",
+                              opacity: 0.65,
+                            }}
+                            title={`Source type: ${c.source_type}`}
+                          >
+                            {c.source_type === "regulation"
+                              ? "Legislation"
+                              : c.source_type === "guidance"
+                                ? "Guidance"
+                                : c.source_type === "national"
+                                  ? "National"
+                                  : c.source_type === "commentary"
+                                    ? "Commentary"
+                                    : c.source_type}
+                          </span>
+                        )}
                       </div>
                       <blockquote
                         className="mt-2 font-serif italic text-lg leading-snug text-ink/85 border-l-2 pl-4"
