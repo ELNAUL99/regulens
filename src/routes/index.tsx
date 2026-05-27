@@ -249,13 +249,11 @@ function Landing({ onEnterApp, signedIn }: { onEnterApp?: () => void; signedIn?:
             </div>
             <h1 className="font-serif text-[clamp(3.5rem,8vw,7.5rem)] leading-[0.94] tracking-[-0.02em]">
               Preliminary
-              <br />
               <span className="italic" style={{ color: "var(--seal)" }}>
                 assessments
               </span>{" "}
-              of AI
               <br />
-              systems, cited
+              of AI systems, cited
               <br />
               to the article.
             </h1>
