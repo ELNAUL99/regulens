@@ -9,12 +9,19 @@ const PDF_PAGE_BATCH_SIZE = 2;
 const PDF_EXTRACTION_BUDGET_MS = 25_000;
 
 let pdfWorker: Worker | null = null;
-let pdfModulePromise: Promise<typeof import("pdfjs-dist")> | null = null;
+let pdfModulePromise: Promise<typeof import("pdfjs-dist/legacy/build/pdf.mjs")> | null = null;
 
 async function getPdfModule() {
-  const pdfjs = await (pdfModulePromise ??= import("pdfjs-dist"));
+  // Use the LEGACY build of pdfjs-dist. The default ESM build relies on
+  // Promise.try / Promise.withResolvers, which are Safari 18.2+ only and
+  // would crash older WebKit inside the worker thread (where main-thread
+  // polyfills can't reach). The legacy build is pre-transpiled for broader
+  // browser compatibility.
+  const pdfjs = await (pdfModulePromise ??= import("pdfjs-dist/legacy/build/pdf.mjs"));
   if (!pdfWorker) {
-    const { default: PdfWorker } = await import("pdfjs-dist/build/pdf.worker.min.mjs?worker");
+    const { default: PdfWorker } = await import(
+      "pdfjs-dist/legacy/build/pdf.worker.min.mjs?worker"
+    );
     pdfWorker = new PdfWorker();
     pdfjs.GlobalWorkerOptions.workerPort = pdfWorker;
   }

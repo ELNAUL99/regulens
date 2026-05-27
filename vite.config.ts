@@ -3,9 +3,9 @@ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import tsConfigPaths from "vite-tsconfig-paths";
-import { cloudflare } from "@cloudflare/vite-plugin";
+import { nitro } from "nitro/vite";
 
-export default defineConfig(({ command }) => ({
+export default defineConfig(() => ({
   server: {
     host: "::",
     port: 8080,
@@ -14,7 +14,7 @@ export default defineConfig(({ command }) => ({
   // the cost on the first user click. Without this, the first attach of a PDF
   // can take 10-15s in dev mode while Vite traverses pdfjs-dist's tree.
   optimizeDeps: {
-    include: ["pdfjs-dist", "mammoth"],
+    include: ["pdfjs-dist/legacy/build/pdf.mjs", "mammoth"],
   },
   resolve: {
     alias: { "@": `${process.cwd()}/src` },
@@ -30,9 +30,9 @@ export default defineConfig(({ command }) => ({
   plugins: [
     tailwindcss(),
     tsConfigPaths({ projects: ["./tsconfig.json"] }),
-    // Cloudflare adapter only kicks in for the production build; in `vite dev`
-    // we run on Node so it's intentionally omitted.
-    ...(command === "build" ? [cloudflare()] : []),
+    // Build target: Vercel's Node serverless runtime. TanStack Start (via
+    // Nitro under the hood) auto-detects Vercel from process.env.VERCEL at
+    // build time and emits the right output layout. No explicit preset needed.
     tanstackStart({
       server: { entry: "server" },
       importProtection: {
@@ -43,6 +43,11 @@ export default defineConfig(({ command }) => ({
         },
       },
     }),
+    // Nitro builds the server bundle into a deploy-target-aware layout.
+    // On Vercel CI the VERCEL env var is set and Nitro auto-selects its
+    // `vercel` preset, emitting .vercel/output/ — Vercel ingests that
+    // directly. Locally it just produces a Node server.
+    nitro(),
     viteReact(),
   ],
 }));

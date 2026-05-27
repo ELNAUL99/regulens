@@ -628,7 +628,9 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
     mutationFn: (vars: { useCase: string; title?: string }) => runFn({ data: vars }),
     onSuccess: (res) => {
       setCurrentResult(res);
-      setLeaderDecision(null);
+      // KEEP leaderDecision so the report can show what the leader checked, the
+      // readiness score, the coverage breakdown, and any noted gaps — even
+      // when the leader auto-routed straight to the council.
       setLeaderAnswers({});
       // Reset the submission form so the user lands on a fresh slate (placeholders
       // visible again) ready for the next assessment.
@@ -643,14 +645,22 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
 
   const leaderMut = useMutation({
     mutationFn: (vars: { useCase: string; title?: string }) => leaderFn({ data: { useCase: vars.useCase } }),
-    onSuccess: (decision, vars) => {
+    // Never auto-route to the council. Always surface the leader's checks
+    // (coverage + any noted gaps) and let the user explicitly convene — even
+    // when the leader thinks the input is complete. This is especially
+    // important for file-only submissions where the leader may still notice
+    // gaps the user could quickly fill in before the council runs.
+    onSuccess: (decision) => {
       setLeaderDecision(decision);
+      setLeaderAnswers({});
       if (decision.next === "assessment") {
-        toast.success("Leader: ready — convening the council");
-        setLeaderAnswers({});
-        runMut.mutate({ useCase: vars.useCase, title: vars.title });
+        toast.message("Leader: input is complete enough", {
+          description:
+            (decision.missing_questions?.length ?? 0) > 0
+              ? "Council can convene. You may also answer the noted follow-ups for a stronger assessment."
+              : "Council can convene whenever you're ready.",
+        });
       } else {
-        setLeaderAnswers({});
         toast.message("Leader: more detail recommended", {
           description: "Answer the questions below, or convene anyway.",
         });
@@ -933,7 +943,7 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
                   setUseCase(e.target.value);
                   if (leaderDecision) setLeaderDecision(null);
                 }}
-                placeholder="Purpose, intended users, affected persons, inputs, outputs, automation level, human oversight, GPAI usage…"
+                placeholder="Purpose, intended users, affected persons, inputs, outputs, automation level, human oversight, GPAI usage…  You can also paste a public URL (PDF / HTML) and the system will fetch and read it."
                 className="border-0 rounded-none bg-transparent px-0 font-serif text-lg leading-[1.6] resize-y focus-visible:ring-0 shadow-none placeholder:text-ink/30"
               />
             </div>
@@ -1048,25 +1058,50 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
               </div>
             </div>
 
-            {leaderDecision && leaderDecision.next === "ask_user" && (
+            {leaderDecision && (
               <div
                 className="mt-6 border-t border-b py-5"
-                style={{ borderColor: "var(--seal)" }}
+                style={{
+                  borderColor:
+                    leaderDecision.next === "ask_user" ? "var(--seal)" : "var(--ink)",
+                }}
               >
                 <div className="flex items-baseline justify-between">
                   <div
                     className="font-mono text-[10px] uppercase tracking-[0.2em]"
-                    style={{ color: "var(--seal)" }}
+                    style={{
+                      color:
+                        leaderDecision.next === "ask_user" ? "var(--seal)" : "var(--ink)",
+                    }}
                   >
-                    Leader agent · routing to user
+                    {leaderDecision.next === "ask_user"
+                      ? "Leader agent · more detail recommended"
+                      : "Leader agent · ready to convene"}
                   </div>
                   <div
-                    className="font-mono text-[10px] uppercase tracking-[0.2em]"
-                    style={{ color: "var(--seal)" }}
+                    className="font-mono text-[10px] uppercase tracking-[0.2em] text-ink/70"
                   >
                     Readiness {Math.round((leaderDecision.readiness_score ?? 0) * 100)}%
                   </div>
                 </div>
+                {Object.keys(leaderDecision.coverage ?? {}).length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1">
+                    {Object.entries(leaderDecision.coverage).map(([k, v]) => (
+                      <span
+                        key={k}
+                        className="font-mono text-[10px] uppercase tracking-[0.15em] px-1.5 py-0.5 border"
+                        style={{
+                          borderColor: "var(--rule)",
+                          color: v ? "var(--ink)" : "var(--seal)",
+                          opacity: v ? 0.85 : 1,
+                        }}
+                        title={v ? "covered" : "noted gap"}
+                      >
+                        {v ? "✓" : "✗"} {k.replace(/_/g, " ")}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <p className="mt-3 font-serif text-base italic text-ink/80">
                   {leaderDecision.rationale}
                 </p>
@@ -1158,11 +1193,21 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
                       runMut.mutate({ useCase: submission, title: title || undefined });
                     }}
                     disabled={runMut.isPending || !corpusReady}
-                    className="font-mono text-[11px] uppercase tracking-[0.2em] py-2.5 px-4 border hover:bg-ink/5 transition-colors disabled:opacity-50 inline-flex items-center gap-2"
-                    style={{ borderColor: "var(--seal)", color: "var(--seal)" }}
+                    className="font-mono text-[11px] uppercase tracking-[0.2em] py-2.5 px-4 hover:opacity-90 transition-opacity disabled:opacity-50 inline-flex items-center gap-2"
+                    style={
+                      leaderDecision.next === "ask_user"
+                        ? { border: "1px solid var(--seal)", color: "var(--seal)" }
+                        : { background: "var(--ink)", color: "var(--paper)" }
+                    }
                   >
-                    <Play className="size-3.5" />
-                    Convene anyway
+                    {runMut.isPending ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <Play className="size-3.5" />
+                    )}
+                    {leaderDecision.next === "ask_user"
+                      ? "Convene anyway"
+                      : "Convene the council"}
                   </button>
                 </div>
               </div>
@@ -1244,6 +1289,63 @@ function Dashboard({ onViewLanding }: { onViewLanding?: () => void } = {}) {
             </div>
           ) : currentResult ? (
             <>
+              {leaderDecision && (
+                <section
+                  className="border-t border-b py-6 mb-10 grid md:grid-cols-12 gap-8"
+                  style={{ borderColor: "var(--rule)" }}
+                >
+                  <div className="md:col-span-2 font-mono text-[10px] uppercase tracking-[0.25em] text-ink/50">
+                    Leader · Routing
+                  </div>
+                  <div className="md:col-span-10 space-y-3">
+                    <div className="flex items-baseline gap-4 flex-wrap">
+                      <div className="font-serif text-xl tracking-tight">
+                        {leaderDecision.next === "assessment"
+                          ? "Council convened directly — input was complete enough."
+                          : "Council convened with noted gaps."}
+                      </div>
+                      <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-ink/55">
+                        Readiness {Math.round((leaderDecision.readiness_score ?? 0) * 100)}%
+                      </span>
+                    </div>
+                    {leaderDecision.rationale && (
+                      <p className="font-serif italic text-base text-ink/75 leading-snug max-w-3xl">
+                        {leaderDecision.rationale}
+                      </p>
+                    )}
+                    {Object.keys(leaderDecision.coverage ?? {}).length > 0 && (
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
+                        {Object.entries(leaderDecision.coverage).map(([k, v]) => (
+                          <span
+                            key={k}
+                            className="font-mono text-[10px] uppercase tracking-[0.15em] px-1.5 py-0.5 border"
+                            style={{
+                              borderColor: "var(--rule)",
+                              color: v ? "var(--ink)" : "var(--seal)",
+                              opacity: v ? 0.85 : 1,
+                            }}
+                            title={v ? "covered" : "noted gap"}
+                          >
+                            {v ? "✓" : "✗"} {k.replace(/_/g, " ")}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {(leaderDecision.missing_questions ?? []).length > 0 && (
+                      <details className="font-serif text-sm text-ink/75">
+                        <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-[0.18em] text-ink/55 hover:text-ink">
+                          Noted follow-up questions ({leaderDecision.missing_questions.length})
+                        </summary>
+                        <ul className="mt-2 space-y-1 list-disc pl-5">
+                          {leaderDecision.missing_questions.map((q, i) => (
+                            <li key={i}>{q}</li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                </section>
+              )}
               <AssessmentReport result={currentResult} />
               <FollowUpChat
                 sessionId={currentResult.sessionId}

@@ -223,6 +223,11 @@ export function AssessmentReport({ result }: { result: Result }) {
       lines.push("");
       lines.push("_The EU AI Act does not apply. The classification below is informational only._");
       lines.push("");
+    } else {
+      lines.push(`## Art. 3(1) gate — qualifies as an AI system`);
+      lines.push("");
+      lines.push(aiGate.rationale ?? "All five Article 3(1) criteria are met.");
+      lines.push("");
     }
     if (art5.triggered) {
       lines.push(`## Article 5 prohibition${art5.letter ? ` (Art. 5(1)(${art5.letter}))` : ""}`);
@@ -406,28 +411,56 @@ export function AssessmentReport({ result }: { result: Result }) {
         </div>
       </header>
 
-      {/* Art. 3(1) gate — "is this an AI system at all?" */}
-      {aiGate.qualifies === false && (
+      {/* Art. 3(1) gate — "is this an AI system at all?" — always rendered so
+         the answer is visible even when it qualifies. */}
+      {aiGate.qualifies === false ? (
         <div
           className="border-t border-b py-6 mb-12 grid md:grid-cols-12 gap-8"
           style={{
-            borderColor: "var(--ink)",
-            background: "color-mix(in oklab, var(--ink) 4%, transparent)",
+            borderColor: "var(--seal)",
+            background: "color-mix(in oklab, var(--seal) 6%, transparent)",
           }}
         >
-          <div className="md:col-span-2 font-mono text-[10px] uppercase tracking-[0.25em] text-ink/70">
+          <div
+            className="md:col-span-2 font-mono text-[10px] uppercase tracking-[0.25em]"
+            style={{ color: "var(--seal)" }}
+          >
             Gate · Art. 3(1)
           </div>
           <div className="md:col-span-10">
-            <div className="font-serif text-2xl tracking-tight">
+            <div className="font-serif text-2xl tracking-tight" style={{ color: "var(--seal)" }}>
               Does not appear to qualify as an AI system
             </div>
             <p className="mt-2 font-serif text-base text-ink/80 leading-snug">
               {aiGate.rationale || "The system fails one or more Article 3(1) criteria."}
             </p>
-            <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/50">
+            <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.2em] text-ink/55">
               The EU AI Act does not apply. The downstream classification below is therefore informational only.
             </p>
+          </div>
+        </div>
+      ) : (
+        <div
+          className="border-t border-b py-5 mb-10 grid md:grid-cols-12 gap-8"
+          style={{ borderColor: "var(--rule)" }}
+        >
+          <div className="md:col-span-2 font-mono text-[10px] uppercase tracking-[0.25em] text-ink/55">
+            Gate · Art. 3(1)
+          </div>
+          <div className="md:col-span-10">
+            <div className="flex items-baseline gap-3 flex-wrap">
+              <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-ink/60">
+                ✓ Qualifies as an AI system
+              </span>
+              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-ink/40">
+                All five Art. 3(1) criteria met
+              </span>
+            </div>
+            {aiGate.rationale && (
+              <p className="mt-2 font-serif text-base italic text-ink/75 leading-snug">
+                {aiGate.rationale}
+              </p>
+            )}
           </div>
         </div>
       )}

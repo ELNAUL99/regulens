@@ -19,6 +19,7 @@ import {
   type Critique,
   type Facts,
 } from "./assessment-schemas";
+import { fetchAndExtract, findUrls, type FetchResult } from "./url-fetch.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -182,7 +183,16 @@ Rules:
 - "Law-enforcement purposes" in (h) is broad: it covers police, border/customs, intelligence services, AND airport/transport/critical-infrastructure security operators (public or private) acting on behalf of or in cooperation with such authorities to detect, identify or screen persons for security threats. A "threat-detection" or "unauthorised-person flagging" airport facial-recognition system that scans guests in real time falls squarely under (h) and is PROHIBITED unless one of the narrow exceptions plus judicial authorisation is documented.
 - One-to-one biometric verification (confirming a specific person's claimed identity, e.g. matching a passenger's face to their own boarding-pass photo) is NOT (h); it is biometric verification and falls under Annex III §1 (high-risk) instead.
 - When biometric/public-space/law-enforcement facts are ambiguous, prefer "prohibited" with a lower confidence and list the missing facts that would move it to "high", rather than defaulting to "high".
-- Otherwise apply Article 6 + Annex III to determine high-risk.
+- DEFAULT risk_tier is "minimal" unless the retrieved excerpts give you specific grounding to classify higher. Do NOT escalate to "high" merely because the system operates in a workplace or industrial context — escalation requires a concrete Annex III hit or an Article 6(1) product-safety hook.
+- Annex III scoping discipline (the most common over-classification errors):
+  • §1 (biometrics): biometric identification or categorisation OR emotion inference of natural persons. NOT generic image processing of objects.
+  • §2 (critical infrastructure): AI used as a SAFETY COMPONENT in the management/operation of digital infrastructure, road traffic, OR the supply of water, gas, heating or electricity (per CER Directive 2022/2557). General factory machinery / industrial process optimisation is NOT "critical infrastructure" for AI Act purposes.
+  • §3 (education): admission, evaluation, or proctoring of natural persons. NOT internal classroom tools without individual scoring.
+  • §4 (employment, workers' management): recruitment / shortlisting, performance evaluation, task allocation, OR monitoring/evaluation OF NATURAL PERSONS in the workplace. AI that monitors MACHINES, predicts MACHINE failures, or schedules MAINTENANCE is NOT §4, even if it runs in a workplace.
+  • §5 (essential services): credit-scoring, public-benefit eligibility, emergency-call triage, life/health insurance pricing OF NATURAL PERSONS. NOT B2B service operations.
+  • §6 (law enforcement), §7 (migration/asylum/border), §8 (justice/democracy): scoped narrowly to those public-authority functions.
+  Tabular ML for predictive maintenance, anomaly detection on equipment sensors, demand forecasting, route optimisation for cargo, and similar industrial decision-support systems are typically MINIMAL risk under the AI Act.
+- Article 6(1) (product-safety hook): only triggers high-risk if the AI is a safety component of, or itself is, a product covered by Annex I Union harmonisation legislation (machinery, medical devices, toys, lifts, radio equipment, etc.) AND that product requires third-party conformity assessment. Industrial ML for operational efficiency is rarely a "safety component" — say so explicitly when it isn't.
 - Generative/conversational AI without high-risk use is typically "limited" with Art. 50 transparency duties.
 - Never invent citations. If you have insufficient grounding, lower confidence and list what's missing.
 - For role_determination: return "both" when the SAME entity both DEVELOPS the system AND OPERATES it under its own authority (typical for consultancies that build + run a model for clients, or SaaS vendors that ship + host the service). Do not default to "provider" merely because the entity built the system — if the description also mentions operating, hosting, managed service, monitoring, retraining, or running the system on behalf of others, that is the deployer side and the correct answer is "both". Use the extracted facts' role_hint as a signal but override it when the description clearly shows both sides.${UNTRUSTED_INPUT_DIRECTIVE}`;
@@ -252,7 +262,8 @@ Return STRICT JSON:
 Rules:
 - Cite only the AI Act excerpt tags provided. Never invent.
 - "confirm" the council if the steel-man does not hold up under the provided excerpts.
-- "revise" only when you find a concrete, citation-grounded problem.${UNTRUSTED_INPUT_DIRECTIVE}`;
+- "revise" only when you find a concrete, citation-grounded problem.
+- IMPORTANT: do not argue "high" simply because the system runs in a workplace or processes industrial data. Annex III §4 (employment) requires that the system evaluate, monitor, or allocate NATURAL PERSONS — not machines. Annex III §2 (critical infrastructure) requires actual utility / road-traffic / digital-infrastructure safety scope, not generic factory equipment. If the council correctly classified an industrial decision-support tool as "minimal", your steel-man for "high" should fail and your verdict should be "confirm".${UNTRUSTED_INPUT_DIRECTIVE}`;
 
   const user = `## Use-case (untrusted user submission)
 ${wrapUntrustedInput(useCase)}
@@ -343,6 +354,41 @@ function verifyCitations(
   return { assessment, verifier_notes: notes };
 }
 
+/**
+ * Expand any http(s) URLs found in the submission by fetching them server-side
+ * and appending the extracted text. Lets the user paste a public PDF/HTML link
+ * (e.g. a vendor case-study URL) and have the council reason about the actual
+ * document, not just the URL slug. Capped at 3 URLs per submission.
+ *
+ * Returns the merged text plus a note string per URL — added to the eventual
+ * verifier_notes so the user can see what was fetched and what failed.
+ */
+async function expandUrls(
+  raw: string,
+): Promise<{ merged: string; notes: string[]; fetched: FetchResult[] }> {
+  const urls = findUrls(raw).slice(0, 3);
+  if (urls.length === 0) return { merged: raw, notes: [], fetched: [] };
+
+  const results = await Promise.all(urls.map((u) => fetchAndExtract(u)));
+  const notes: string[] = [];
+  const appended: string[] = [];
+  for (const r of results) {
+    if (r.ok) {
+      notes.push(`Fetched ${r.url} (${r.contentType}, ${r.text.length} chars extracted).`);
+      appended.push(
+        `\n\n--- Fetched from ${r.url} (${r.contentType}) ---\n${r.text}`,
+      );
+    } else {
+      notes.push(`Could not fetch ${r.url}: ${r.reason}.`);
+    }
+  }
+  // Hard ceiling to avoid blowing past the council's context budget. The Zod
+  // input validator already capped raw at 20k; we allow up to 60k after
+  // fetching so a couple of medium PDFs fit.
+  const merged = (raw + appended.join("")).slice(0, 60_000);
+  return { merged, notes, fetched: results };
+}
+
 /** Orchestrator — public server fn called by the UI. */
 export const runAssessment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -357,7 +403,12 @@ export const runAssessment = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { userId, supabase } = context;
 
-    // 1. Create session + document.
+    // 0. Expand any URLs in the submission server-side so a pasted PDF link
+    //    yields the same input the council would see from a direct upload.
+    const { merged: expandedUseCase, notes: fetchNotes } = await expandUrls(data.useCase);
+
+    // 1. Create session + document. Persist the EXPANDED text so subsequent
+    //    chat / revise calls see what the council actually reasoned on.
     const { data: session, error: sErr } = await supabase
       .from("sessions")
       .insert({ user_id: userId, title: data.title ?? data.useCase.slice(0, 60), status: "running" })
@@ -368,30 +419,35 @@ export const runAssessment = createServerFn({ method: "POST" })
     await supabase.from("documents").insert({
       session_id: session.id,
       filename: "use-case.txt",
-      content: data.useCase,
+      content: expandedUseCase,
       file_type: "text/plain",
     });
 
     try {
       // 2. Extract facts.
-      const facts = await extractFacts(data.useCase);
+      const facts = await extractFacts(expandedUseCase);
 
       // 3. Retrieve relevant Act excerpts.
-      const retrievalQuery = `${data.useCase}\n\nFacts: ${JSON.stringify(facts).slice(0, 1000)}`;
+      const retrievalQuery = `${expandedUseCase}\n\nFacts: ${JSON.stringify(facts).slice(0, 1000)}`;
       const chunks = await retrieve(supabase, retrievalQuery, 24);
 
       // 4. Council reasoning.
-      const council = await councilAssess(data.useCase, facts, formatContext(chunks));
+      const council = await councilAssess(expandedUseCase, facts, formatContext(chunks));
       if (!council.ok) {
         throw new Error(`Council output failed validation: ${council.reason}`);
       }
 
       // 5. Verifier.
-      const { assessment, verifier_notes } = verifyCitations(council.assessment, chunks);
+      const { assessment, verifier_notes: cite_notes } = verifyCitations(
+        council.assessment,
+        chunks,
+      );
+      // Prepend the URL-fetch notes so the user sees what was fetched.
+      const verifier_notes = [...fetchNotes, ...cite_notes];
 
       // 5a. Red-team critique (parallel-safe to run after verifier).
       const critique = await redTeamCritique(
-        data.useCase,
+        expandedUseCase,
         facts,
         formatContext(chunks),
         assessment,
@@ -539,10 +595,15 @@ export const reviseAssessment = createServerFn({ method: "POST" })
     const doc = Array.isArray(session.documents) ? session.documents[0] : session.documents;
     const original = (doc?.content as string | undefined) ?? "";
 
+    // Also expand any URLs the user pastes inside the additional context so
+    // the revise path stays consistent with the initial assessment.
+    const { merged: expandedAdditional, notes: fetchNotes } = await expandUrls(
+      data.additionalContext,
+    );
     const merged =
-      `${original}\n\n--- Additional information supplied by the user ---\n${data.additionalContext}`.slice(
+      `${original}\n\n--- Additional information supplied by the user ---\n${expandedAdditional}`.slice(
         0,
-        20_000,
+        60_000,
       );
 
     // Re-run the pipeline.
@@ -556,7 +617,8 @@ export const reviseAssessment = createServerFn({ method: "POST" })
     if (!council.ok) {
       throw new Error(`Council output failed validation: ${council.reason}`);
     }
-    const { assessment, verifier_notes } = verifyCitations(council.assessment, chunks);
+    const { assessment, verifier_notes: cite_notes } = verifyCitations(council.assessment, chunks);
+    const verifier_notes = [...fetchNotes, ...cite_notes];
     const critique = await redTeamCritique(merged, facts, formatContext(chunks), assessment);
 
     const { data: saved, error: aErr } = await supabase
