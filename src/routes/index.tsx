@@ -248,14 +248,12 @@ function Landing({ onEnterApp, signedIn }: { onEnterApp?: () => void; signedIn?:
               A leader agent and a six-agent council on the AI Act
             </div>
             <h1 className="font-serif text-[clamp(3.5rem,8vw,7.5rem)] leading-[0.94] tracking-[-0.02em]">
-              Preliminary
+              Preliminary{" "}
               <span className="italic" style={{ color: "var(--seal)" }}>
                 assessments
               </span>{" "}
               <br />
-              of AI systems, cited
-              <br />
-              to the article.
+              of AI systems, cited to the article.
             </h1>
           </div>
         </div>
