@@ -1,0 +1,47 @@
+name: Supabase keepalive
+
+# Hits a public-readable Supabase REST endpoint once a day so the project
+# never crosses the 7-day inactivity threshold and gets paused. A trivial
+# SELECT counts as activity. Runs in GitHub Actions cron — independent of
+# whether your laptop is on.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   SUPABASE_URL              e.g. https://ytbskwcjsgabuhxjupos.supabase.co
+#   SUPABASE_PUBLISHABLE_KEY  the anon/publishable JWT
+#
+# Adjust the cron below if you want a different cadence. Daily at 06:00 UTC
+# is plenty (Supabase tolerates 7 days of silence).
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # every day at 06:00 UTC
+  workflow_dispatch:      # also lets you trigger manually from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping corpus_chunks (public SELECT keeps the DB warm)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_PUBLISHABLE_KEY" ]; then
+            echo "::error::Missing SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY repo secret"
+            exit 1
+          fi
+          status=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
+            "$SUPABASE_URL/rest/v1/corpus_chunks?select=count" \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_PUBLISHABLE_KEY" \
+            -H "Prefer: count=exact" \
+            -H "Range: 0-0")
+          echo "HTTP $status"
+          head -c 200 /tmp/resp.json; echo
+          # 206 (Partial Content) is the normal response for Range requests.
+          case "$status" in
+            200|206) echo "OK — project is awake." ;;
+            *) echo "::error::Unexpected status $status"; exit 1 ;;
+          esac
